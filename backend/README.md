@@ -1,4 +1,4 @@
-# RetailVerse AI · Backend
+# RetailVerse · Backend
 
 FastAPI backend for the AI Retail Decision Twin (TCS Hackathon, Retail PS3). It implements the blueprint's rule:
 **LLMs do language; forecasts, optimization and simulation are deterministic services the LLM calls as tools.**
@@ -16,16 +16,14 @@ cp .env.example .env            # optional
 * The repo's static prototype is also served at http://localhost:8000/
 * Tests: `.venv/bin/python -m pytest -q`
 
-## Open-source LLM (pick one)
+## Ollama LLM (default)
 
 | Option | Setup |
 |---|---|
-| **Groq** (hosted Llama/Qwen) | `GROQ_API_KEY=...` in `backend/.env` (default model `llama-3.3-70b-versatile`) |
-| **Ollama** (local) | `ollama serve` then `ollama pull llama3.1:8b` (any tool-calling model: `qwen2.5`, `llama3.1`, `mistral-nemo`) |
-| **None** | Copilot falls back to a deterministic intent router that calls the same tools |
+| **Ollama** (local, default) | `ollama serve` then `ollama pull llama3.1:8b` (or another tool-calling model) |
+| **Rules fallback** | Used automatically when Ollama is unavailable |
 
-`LLM_PROVIDER=auto` (default) uses Groq if a key is set, else Ollama if reachable, else the rules engine. Check with `GET /api/llm`.
-Both providers speak the OpenAI-compatible `/chat/completions` tool-calling API, so one client (`app/llm.py`) serves both.
+`LLM_PROVIDER=ollama` (default) uses the local Ollama server at `http://localhost:11434/v1`. If Ollama is unavailable, copilot falls back to the deterministic rules engine. Check with `GET /api/llm`.
 
 ## Copilot design (`app/copilot.py`)
 
@@ -57,7 +55,7 @@ app/models.py    forecast, stockout, margin, Monte Carlo, constraints, conflicts
 app/services.py  tool layer + proposals/change sets + accept/reject + guardrailed copy
 app/ops.py       simulation lab, approvals, war room, learning, governance, control tower
 app/copilot.py   tool schemas, LLM loop, grounding check, rules fallback
-app/llm.py       Ollama/Groq OpenAI-compatible client
+app/llm.py       Ollama-compatible client (Groq remains an optional provider)
 app/store.py     SQLite persistence (state JSON + audit table)
 ```
 

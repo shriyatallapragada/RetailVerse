@@ -1,6 +1,6 @@
 'use strict';
 /* =====================================================================
-   AI BOS · Business Operations System — prototype
+   RetailVerse · AI Retail Decision Twin — prototype
    Everything runs in the browser on synthetic data. Numbers shown by the
    copilot always come from the simulator / optimizer functions below;
    the copilot text layer never invents figures.
@@ -145,6 +145,35 @@ function normal(r) { return Math.sqrt(-2 * Math.log(r() || 1e-9)) * Math.cos(2 *
 function toast(t) { const el = document.createElement('div'); el.className = 'toast'; el.innerHTML = t; $('#toasts').appendChild(el); setTimeout(() => el.remove(), 3200); }
 function audit(who, action, detail, src = 'human') { S.audit.unshift({ t: nowStr(), who, action, detail, src }); }
 const role = () => ROLES[S.role];
+window.RetailVerseRole = () => S?.role || 'marketing';
+const backendOnline = () => !!window.RetailVerseAPI && !!window.RetailVerseStatus?.online;
+function localCampaign(x) { const { id,name,region,cat,start,len,disc,aud,budget,status,mech,excl } = x; return { id,name,region,cat,start,len,disc,aud,budget,status,mech,excl }; }
+async function hydratePlan() { const v = await RetailVerseAPI.plan(); S.plan = { items: v.items.map(localCampaign), transfers: v.transfers || [] }; S.ghosts = v.ghosts; S.backendCanUndo=v.can_undo;S.backendCanRedo=v.can_redo;S.backendViews ||= {};S.backendViews.plan=v; }
+async function loadScreenFromBackend(screen) {
+  if (!backendOnline()) return;
+  const V = S.backendViews ||= {};
+  try {
+    if (screen === 'control') [V.control, V.brief] = await Promise.all([RetailVerseAPI.control(), RetailVerseAPI.executiveBrief()]);
+    if (screen === 'planning') { [V.audit, V.conflicts, V.constraints, V.history, V.proposals] = await Promise.all([RetailVerseAPI.audit(200), RetailVerseAPI.conflicts(), RetailVerseAPI.constraints(), RetailVerseAPI.chatHistory(), RetailVerseAPI.proposals()]); V.proposals.proposals=await Promise.all((V.proposals.proposals||[]).map(p=>RetailVerseAPI.proposal(p.id))); S.proposals=Object.fromEntries((V.proposals.proposals||[]).map(p=>[p.id,{...p,remote:true,validViol:p.validation?.rule_violations_after??0,changes:(p.changes||[]).map(c=>({...c,st:c.st||'pending',label:c.label||c.type,why:c.why||''}))}])); S.audit=(V.audit.events||[]).map(e=>({t:new Date(e.ts*1000).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit'}),who:e.who,action:e.action,detail:e.detail,src:e.src})); }
+    if (screen === 'promo') { const [pulse, inventory, segments, plan] = await Promise.all([RetailVerseAPI.marketPulse(), RetailVerseAPI.inventory(), RetailVerseAPI.segments().catch(()=>null), RetailVerseAPI.plan()]); const forecast=await Promise.all(['TS','KA','MH','DL'].flatMap(r=>['FW','AP','BT','EL','GR'].map(cat=>RetailVerseAPI.forecast({region:r,cat,days:14})))); V.promo = { pulse, inventory, segments, plan, forecast }; }
+    if (screen === 'sim') { const id=S.sim.id || S.sel || S.plan.items[0]?.id; if (id) { const [lab, simulation, optimized, constraints, conflicts, discount, transfer] = await Promise.all([RetailVerseAPI.simulation(id), RetailVerseAPI.simulate({item_id:id}), RetailVerseAPI.optimize({item_id:id}), RetailVerseAPI.constraints(id), RetailVerseAPI.conflicts(), RetailVerseAPI.explainDiscount(id), RetailVerseAPI.suggestTransfer(id)]); V.sim={lab,simulation,optimized,constraints,conflicts,discount,transfer};S.sim.crisis=lab.crisis;S.sim.stress=lab.stress||{}; } }
+    if (screen === 'approvals') { V.approvals=await RetailVerseAPI.approvals(); const id=S.apprSel || S.plan.items.find(i=>i.status!=='Draft')?.id; if(id) { V.approval=await RetailVerseAPI.approval(id); V.creative=await RetailVerseAPI.creativeDraft(id,S.creativeTone); const c=V.creative.copy; V.creativeCheck=await RetailVerseAPI.creativeCheck(Object.values(c).join(' '),id); } }
+    if (screen === 'war') { [V.war,V.learning]=await Promise.all([RetailVerseAPI.warroom(),RetailVerseAPI.learning()]); S.war.day=V.war.day; S.war.transfer=V.war.transfer; S.war.alerted=!!V.war.alert; S.learnGuardAdded=V.learning.guardrail_added; }
+    if (screen === 'gov') { [V.governance,V.audit]=await Promise.all([RetailVerseAPI.governance(),RetailVerseAPI.audit(200)]); S.audit=(V.audit.events||[]).map(e=>({t:new Date(e.ts*1000).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit'}),who:e.who,action:e.action,detail:e.detail,src:e.src})); }
+  } catch (e) { console.warn('Backend screen refresh:',e.message); }
+  if (S.screen===screen) render();
+}
+async function connectBackend() {
+  try { const [health,llm,meta] = await Promise.all([RetailVerseAPI.health(),RetailVerseAPI.llm(),RetailVerseAPI.meta()]);
+    window.RetailVerseStatus={online:true,llm}; S.backendMeta=meta; await hydratePlan();
+    const gov=await RetailVerseAPI.governance(); S.guard=gov.guard; S.tier=gov.tier; S.profile=gov.profile; S.season=gov.season;
+    const audit=await RetailVerseAPI.audit(200); S.audit=(audit.events||[]).map(e=>({t:new Date(e.ts*1000).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit'}),who:e.who,action:e.action,detail:e.detail,src:e.src}));
+    const history=await RetailVerseAPI.chatHistory(); if(history.messages?.length) S.chat=history.messages.map(m=>({who:m.role==='user'?'user':'ai',html:esc(m.content||'')}));
+    S.apiAvailable=true; render(); await loadScreenFromBackend(S.screen);
+  } catch(e) { window.RetailVerseStatus={online:false,llm:null}; S.apiAvailable=false; render(); }
+}
+
+async function apiCall(fn, onError) { try { return await fn(); } catch (e) { console.error(e); toast(`Backend: ${esc(e.message)}${onError ? ` · ${esc(onError)}` : ''}`); return null; } }
 const canEdit = () => role().edit;
 const item = id => S.plan.items.find(i => i.id === id);
 const sigma = () => SEASONS[S.season].sigma;
@@ -160,6 +189,7 @@ function stockOf(plan, r, c) {
   return s;
 }
 function sim(it, plan, o = {}) {
+  if(backendOnline() && plan===S.plan && Object.keys(o).length===0){const row=S.backendViews?.plan?.items?.find(x=>x.id===it.id);if(row&&['name','region','cat','start','len','disc','aud','budget','mech','excl'].every(k=>row[k]===it[k])){const x=row.metrics;const D=x.forecast_units,B=x.baseline_units,I=x.incremental_units,revenue=x.revenue,stk=x.stock,marginPct=x.margin_pct;return {B,I,D,stk,sd:Math.max(1,(x.forecast_high-x.forecast_low)/2.56),pStock:x.stockout_pct/100,sold:x.units_sold,revenue,gross:(marginPct*revenue/100)+it.budget,marginPct,incRev:x.incremental_revenue,incProfit:x.incremental_profit,waste:x.discount_waste,dos:x.days_of_supply,eff:1,incUnits:I};}}
   const cat = CATS[it.cat], aud = AUD[it.aud], b = BASE[it.region][it.cat];
   let B = 0; for (let d = it.start; d < it.start + it.len; d++) B += b[0] * seasonMult(d, it.cat);
   if (it.excl) B *= .9;
@@ -314,40 +344,46 @@ function newProposal(title, changes, evidence, note) {
   return id;
 }
 function withPendingOnly(changes) { const p = clone(S.plan); changes.forEach(c => applyChange(p, c)); return p; }
-function decide(cid, ok) {
+async function decide(cid, ok) {
+  const beforePlan=clone(S.plan);
   for (const p of Object.values(S.proposals)) {
     const c = p.changes.find(x => x.cid === cid);
     if (!c || c.st !== 'pending') continue;
     if (ok) {
       if (!canEdit()) { toast('Your role is read-only. Ask a planner to accept.'); return; }
-      pushUndo(); applyChange(S.plan, c); c.st = 'accepted';
+      if (backendOnline() && p.remote) { const saved = await apiCall(() => RetailVerseAPI.acceptChange(p.id, c.cid, c.patch)); if (!saved) return; c.st = saved.changes.find(x => x.cid === c.cid)?.st || 'accepted'; await hydratePlan(); }
+      if (!p.remote) { pushUndo(); applyChange(S.plan, c); } c.st = 'accepted';
       audit(role().n, 'Accepted AI change', c.label);
-      explainChange(lastUndo(), [changeTarget(c)], 'Accepted AI change: ' + c.label, 'ai');
-    } else { c.st = 'rejected'; audit(role().n, 'Rejected AI change', c.label); }
+      explainChange(p.remote ? beforePlan : lastUndo(), [changeTarget(c)], 'Accepted AI change: ' + c.label, 'ai');
+    } else { if (backendOnline() && p.remote) { const saved = await apiCall(() => RetailVerseAPI.rejectChange(p.id, c.cid)); if (!saved) return; c.st = saved.changes.find(x => x.cid === c.cid)?.st || 'rejected'; } else c.st = 'rejected'; audit(role().n, 'Rejected AI change', c.label); }
   }
   render();
 }
-function decideAll(pid, ok) {
+async function decideAll(pid, ok) {
+  const beforePlan=clone(S.plan);
   const p = S.proposals[pid]; if (!p) return;
   if (ok && !canEdit()) { toast('Your role is read-only.'); return; }
-  if (ok) pushUndo();
+  if (backendOnline() && p.remote) { const saved = await apiCall(() => ok ? RetailVerseAPI.acceptProposal(pid) : RetailVerseAPI.rejectProposal(pid)); if (!saved) return; p.changes = saved.changes; p.status = saved.status; if (ok) await hydratePlan(); }
+  if (ok && !p.remote) pushUndo();
   p.changes.filter(c => c.st === 'pending').forEach(c => {
     if (ok) { applyChange(S.plan, c); c.st = 'accepted'; audit(role().n, 'Accepted AI change', c.label); }
     else { c.st = 'rejected'; audit(role().n, 'Rejected AI change', c.label); }
   });
-  if (ok) explainChange(lastUndo(), p.changes.filter(c => c.st === 'accepted').map(changeTarget), `Accepted AI change set: ${p.title}`, 'ai');
+  if (ok) explainChange(p.remote ? beforePlan : lastUndo(), p.changes.filter(c => c.st === 'accepted').map(changeTarget), `Accepted AI change set: ${p.title}`, 'ai');
   render();
 }
 
 /* ---------------- Undo / redo ---------------- */
 function pushUndo() { S.undo.push(clone(S.plan)); if (S.undo.length > 60) S.undo.shift(); S.redo = []; }
-function undo() { if (!S.undo.length) return; S.redo.push(clone(S.plan)); S.plan = S.undo.pop(); audit(role().n, 'Undo', 'Reverted last change'); render(); }
-function redo() { if (!S.redo.length) return; S.undo.push(clone(S.plan)); S.plan = S.redo.pop(); audit(role().n, 'Redo', ''); render(); }
-function updateItem(id, patch, label) {
+async function undo() { if (backendOnline()) { const v = await apiCall(() => RetailVerseAPI.undo()); if (!v) return; await hydratePlan(); render(); return; } if (!S.undo.length) return; S.redo.push(clone(S.plan)); S.plan = S.undo.pop(); audit(role().n, 'Undo', 'Reverted last change'); render(); }
+async function redo() { if (backendOnline()) { const v = await apiCall(() => RetailVerseAPI.redo()); if (!v) return; await hydratePlan(); render(); return; } if (!S.redo.length) return; S.undo.push(clone(S.plan)); S.plan = S.redo.pop(); audit(role().n, 'Redo', ''); render(); }
+async function updateItem(id, patch, label) {
   if (!canEdit()) { toast('Read-only for ' + role().n); return; }
-  pushUndo(); Object.assign(item(id), patch);
+  const before=clone(S.plan);
+  if (backendOnline()) { const saved=await apiCall(()=>patch.status==='In review'?RetailVerseAPI.submitApproval(id):RetailVerseAPI.patchItem(id,patch)); if(!saved){await apiCall(()=>hydratePlan());render();return;} await hydratePlan();S.backendCanUndo=true;S.backendCanRedo=false; }
+  else { pushUndo();Object.assign(item(id),patch); }
   audit(role().n, 'Edited campaign', `${item(id).name}: ${label || Object.keys(patch).join(', ')}`);
-  explainChange(lastUndo(), [id], `Edited ${label || Object.keys(patch).join(', ')}`);
+  explainChange(before, [id], `Edited ${label || Object.keys(patch).join(', ')}`);
   render();
 }
 
@@ -355,7 +391,7 @@ function updateItem(id, patch, label) {
 function renderNav() {
   $('#nav').innerHTML = NAV.map(n => `<button class="${S.screen === n.k ? 'active' : ''}" onclick="go('${n.k}')"><span class="ico">${n.i}</span>${n.n}${n.tag ? `<span class="tag">${n.tag}</span>` : ''}</button>`).join('');
 }
-function go(k) { S.screen = k; render(); }
+function go(k) { S.screen = k; render(); loadScreenFromBackend(k); }
 function renderTopbar() {
   const t = NAV.find(n => n.k === S.screen);
   $('#title').textContent = t.n;
@@ -372,6 +408,7 @@ function renderTopbar() {
   $('#profileSel').innerHTML = Object.entries(PROFILES).map(([k, v]) => `<option value="${k}" ${k === S.profile ? 'selected' : ''}>${v.n}</option>`).join('');
   $('#seasonSel').innerHTML = Object.entries(SEASONS).map(([k, v]) => `<option value="${k}" ${k === S.season ? 'selected' : ''}>${v.n}</option>`).join('');
   $('#roleSel').innerHTML = Object.entries(ROLES).map(([k, v]) => `<option value="${k}" ${k === S.role ? 'selected' : ''}>${v.n}</option>`).join('');
+  let apiBadge=$('#apiStatus'); if(!apiBadge){ apiBadge=document.createElement('span'); apiBadge.id='apiStatus'; apiBadge.className='chip'; $('#roleSel').parentElement.after(apiBadge); } const st=window.RetailVerseStatus; apiBadge.className=`chip ${st?.online ? (st.llm?.available?'green':'amber') : 'red'}`; apiBadge.textContent=st?.online ? (st.llm?.available ? `API · Ollama ${st.llm.model}` : 'API · rules fallback') : 'API offline · local mode';
 }
 function render() {
   renderNav(); renderTopbar();
@@ -380,7 +417,7 @@ function render() {
   ({ control: renderControl, planning: renderPlanning, promo: renderPromo, sim: renderSim, approvals: renderApprovals, war: renderWar, gov: renderGov })[S.screen]();
   if (S.screen !== 'planning') renderSide();
 }
-function resetDemo() { if (confirm('Reset the demo to its starting state?')) { clearInterval(warTimer); initState(); render(); toast('Demo reset'); } }
+async function resetDemo() { if (confirm('Reset the demo to its starting state?')) { if (backendOnline()) { const ok = await apiCall(() => RetailVerseAPI.reset()); if (!ok) return; } clearInterval(warTimer); initState(); if (backendOnline()) await hydratePlan(); render(); toast('Demo reset'); } }
 
 /* =====================================================================
    PLANNING CANVAS
@@ -405,8 +442,8 @@ function renderPlanning() {
       <div class="seg">${[['none', 'None'], ['inv', 'Inventory'], ['demand', 'Demand'], ['margin', 'Margin']].map(([k, n]) => `<button class="${S.overlay === k ? 'on' : ''}" onclick="S.overlay='${k}';renderPlanning()">${n}</button>`).join('')}</div>
       <div class="seg"><button onclick="zoom(-1)" title="Zoom out">−</button><button onclick="zoom(1)" title="Zoom in">＋</button></div>
       <div style="flex:1"></div>
-      <button class="btn sm" onclick="undo()" ${S.undo.length ? '' : 'disabled'} title="Undo">↶ Undo</button>
-      <button class="btn sm" onclick="redo()" ${S.redo.length ? '' : 'disabled'} title="Redo">↷ Redo</button>
+      <button class="btn sm" onclick="undo()" ${(backendOnline()?S.backendCanUndo:S.undo.length) ? '' : 'disabled'} title="Undo">↶ Undo</button>
+      <button class="btn sm" onclick="redo()" ${(backendOnline()?S.backendCanRedo:S.redo.length) ? '' : 'disabled'} title="Redo">↷ Redo</button>
       <button class="btn sm primary" onclick="newCampaign()" ${canEdit() ? '' : 'disabled'}>＋ New campaign</button>
     </div>
 
@@ -616,13 +653,14 @@ function bindCanvas() {
     showTip(e, `<b>${esc(it.name)}</b> · ${range(it)} (${it.len}d) · ${REGIONS[it.region].city} · ${CATS[it.cat].n}<br>Stockout ${pct(m.pStock * 100)} · Margin ${pct(m.marginPct, 1)} · ${v.length ? '⛔ ' + v.length + ' rule' + (v.length > 1 ? 's' : '') : '✓ rules OK'}`);
     renderKpis();
   });
-  document.addEventListener('pointerup', () => {
+  document.addEventListener('pointerup', async () => {
     if (!drag) return;
     const d = drag; drag = null; hideTip();
     if (!d.moved) { S.sel = d.id; renderPlanning(); $('#detailCard').scrollIntoView({ behavior: 'smooth', block: 'start' }); return; }
     const it = d.it, o = d.orig;
     const changed = it.start !== o.start || it.len !== o.len || it.region !== o.region || it.cat !== o.cat;
     if (changed) {
+      if (backendOnline()) { const saved=await apiCall(()=>RetailVerseAPI.patchItem(it.id,{start:it.start,len:it.len,region:it.region,cat:it.cat})); if(!saved){await apiCall(()=>hydratePlan());renderPlanning();return;} await hydratePlan();S.backendCanUndo=true;S.backendCanRedo=false; }
       S.undo.push(d.snap); S.redo = [];
       const parts = [];
       if (it.start !== o.start) parts.push(`${Math.abs(it.start - o.start)} day${Math.abs(it.start - o.start) > 1 ? 's' : ''} ${it.start < o.start ? 'earlier' : 'later'}`);
@@ -639,15 +677,14 @@ function bindCanvas() {
 function showTip(e, html) { let t = $('#dragtip'); if (!t) { t = document.createElement('div'); t.id = 'dragtip'; t.className = 'drag-tip'; document.body.appendChild(t); } t.innerHTML = html; t.style.left = e.clientX + 14 + 'px'; t.style.top = e.clientY + 16 + 'px'; }
 function hideTip() { const t = $('#dragtip'); if (t) t.remove(); }
 
-function newCampaign() {
+async function newCampaign() {
   if (!canEdit()) return;
-  pushUndo();
-  const region = S.groupBy === 'region' ? rowKeys()[0] : 'TS', cat = S.groupBy === 'category' ? 'AP' : 'AP';
+  const before=clone(S.plan);
+  const region = S.groupBy === 'region' ? rowKeys()[0] : 'TS', cat = 'AP';
   const it = { id: nid('c'), name: 'New campaign', region, cat, start: 14, len: 7, disc: 15, aud: S.tier >= 2 ? 'uplift' : 'all', budget: 50000, status: 'Draft', mech: '% off', excl: false };
-  S.plan.items.push(it); S.sel = it.id;
-  audit(role().n, 'Created campaign', it.name);
-  explainChange(lastUndo(), [it.id], 'New campaign');
-  renderPlanning();
+  if (backendOnline()) { const saved=await apiCall(()=>RetailVerseAPI.createItem(it)); if(!saved)return; it.id=saved.id;await hydratePlan();S.backendCanUndo=true;S.backendCanRedo=false; }
+  else { pushUndo();S.plan.items.push(it); }
+  S.sel = it.id;audit(role().n, 'Created campaign', it.name);explainChange(before, [it.id], 'New campaign');renderPlanning();
 }
 
 /* ---- AI copilot: floating button + slide-out drawer ---- */
@@ -788,19 +825,20 @@ function liveDisc(id, v) {
   $('#dmetrics').innerHTML = metricBoxes(it, sim(it, S.plan));
   renderKpis(); renderTL();
 }
-function commitDisc(id, v) {
-  if (S._discSnap) { S.undo.push(S._discSnap); S.redo = []; explainChange(S._discSnap, [id], 'Discount changed'); S._discSnap = null; }
+async function commitDisc(id, v) {
+  if (backendOnline()) { const saved=await apiCall(()=>RetailVerseAPI.patchItem(id,{disc:+v})); if(!saved){await apiCall(()=>hydratePlan());renderPlanning();return;} await hydratePlan();S.backendCanUndo=true;S.backendCanRedo=false; }
+  if (S._discSnap) { if(!backendOnline()){S.undo.push(S._discSnap);S.redo=[];} explainChange(S._discSnap, [id], 'Discount changed'); S._discSnap = null; }
   audit(role().n, 'Edited campaign', `${item(id).name}: discount → ${v}%`);
   renderPlanning();
 }
-function setStatus(id, st) {
+async function setStatus(id, st) {
   const it = item(id);
   if (['In review', 'Approved', 'Live'].includes(st)) {
     const v = violations(it, sim(it, S.plan));
     if (v.length && !S.overrides[id]) {
       const reason = prompt(`⛔ ${it.name} violates ${v.length} hard rule(s):\n• ${v.map(x => x.t).join('\n• ')}\n\nEnter an override reason to continue (recorded in audit log):`);
       if (!reason) { toast('Blocked by guardrails. Fix the campaign or give an override reason.'); renderPlanning(); return; }
-      S.overrides[id] = reason; audit(role().n, 'Guardrail override', `${it.name}: "${reason}"`);
+      if(backendOnline() && !await apiCall(()=>RetailVerseAPI.override(id,reason))) return; S.overrides[id] = reason; audit(role().n, 'Guardrail override', `${it.name}: "${reason}"`);
     }
   }
   if (st === 'Approved' || st === 'Live') { toast('Approval happens in Readiness & Approval (separation of duties).'); renderPlanning(); return; }
@@ -808,17 +846,17 @@ function setStatus(id, st) {
   if (st === 'In review') S.approvals[id] = S.approvals[id] || 0;
 }
 function sendToReview(id) { setStatus(id, 'In review'); }
-function delItem(id) {
+async function delItem(id) {
   if (!confirm('Delete this campaign? (You can undo.)')) return;
-  pushUndo(); const it = item(id);
-  S.plan.items = S.plan.items.filter(i => i.id !== id); audit(role().n, 'Deleted campaign', it.name);
-  explainChange(lastUndo(), [id], 'Deleted campaign');
-  S.sel = null; render();
+  const before=clone(S.plan),it=item(id);
+  if (backendOnline()) { const saved=await apiCall(()=>RetailVerseAPI.deleteItem(id)); if(!saved)return;await hydratePlan();S.backendCanUndo=true;S.backendCanRedo=false; }
+  else { pushUndo();S.plan.items=S.plan.items.filter(i=>i.id!==id); }
+  audit(role().n, 'Deleted campaign', it.name);explainChange(before,[id],'Deleted campaign');S.sel=null;render();
 }
 function historyHtml() {
   return `<div class="details">
-    <div class="row between"><div class="h2">Version history</div><div class="row"><button class="btn sm" onclick="undo()" ${S.undo.length ? '' : 'disabled'}>↶ Undo</button><button class="btn sm" onclick="redo()" ${S.redo.length ? '' : 'disabled'}>↷ Redo</button></div></div>
-    <div class="muted" style="font-size:12px;margin-bottom:8px">Plan v${S.undo.length + 1} · ${S.undo.length} earlier version${S.undo.length === 1 ? '' : 's'} kept · data snapshot 30 Sep 06:00 · model v0.3</div>
+    <div class="row between"><div class="h2">Version history</div><div class="row"><button class="btn sm" onclick="undo()" ${(backendOnline()?S.backendCanUndo:S.undo.length) ? '' : 'disabled'}>↶ Undo</button><button class="btn sm" onclick="redo()" ${(backendOnline()?S.backendCanRedo:S.redo.length) ? '' : 'disabled'}>↷ Redo</button></div></div>
+    <div class="muted" style="font-size:12px;margin-bottom:8px">Plan v${(backendOnline()?1+Number(S.backendCanUndo):S.undo.length+1)} · ${backendOnline()?(S.backendCanUndo?'earlier versions kept':'no earlier versions kept'):`${S.undo.length} earlier version${S.undo.length === 1 ? '' : 's'} kept`} · data snapshot 30 Sep 06:00 · model v0.3</div>
     <div class="sec-t">Audit log</div>
     <div class="history">${S.audit.slice(0, 60).map(a => `<div><span class="faint">${a.t}</span> · <b>${esc(a.who)}</b> ${a.src === 'ai' ? '<span class="chip ai">AI</span>' : ''} ${esc(a.action)}<br><span class="muted">${esc(a.detail)}</span></div>`).join('')}</div>
   </div>`;
@@ -827,18 +865,23 @@ function historyHtml() {
 /* =====================================================================
    COPILOT (deterministic intent parser + tool calls)
    ===================================================================== */
-function ask(text) {
+async function ask(text) {
   if (S.screen !== 'planning') { S.screen = 'planning'; render(); }
   S.chat.push({ who: 'user', html: esc(text) });
   S.copilotOpen = true; S.thinking = true; renderSide();
   audit(role().n, 'Asked copilot', text);
-  setTimeout(() => {
-    S.thinking = false;
-    let r;
-    try { r = route(text); } catch (err) { console.error(err); r = { html: 'Sorry — I could not complete that request.' }; }
-    S.chat.push({ who: 'ai', ...r });
-    renderPlanning();
-  }, 700);
+  let r;
+  if (backendOnline()) {
+    const result = await apiCall(() => RetailVerseAPI.chat({ message: text, selected_id: S.sel, mode: 'auto' }));
+    if (result) {
+      const proposals = (result.proposals || []).map(p => { const normalized = { ...p, remote: true, validViol: p.validation?.rule_violations_after ?? 0, changes: (p.changes || []).map(c => ({ ...c, st: c.st || 'pending', label: c.label || c.type, why: c.why || '' })) }; S.proposals[p.id] = normalized; return normalized; });
+      r = { html: `<div>${esc(result.reply || 'Done.').replace(/\n/g, '<br>')}</div>${result.mode === 'llm' ? `<div class="muted" style="margin-top:6px">Ollama · ${esc(result.provider?.model || 'local model')}</div>` : '<div class="muted" style="margin-top:6px">Rules fallback · Ollama unavailable</div>'}`, prop: proposals[0]?.id, tools: (result.tool_calls || []).map(t => t.name), evidence: proposals[0]?.evidence };
+    }
+  }
+  if (!r) { try { r = route(text); } catch (err) { console.error(err); r = { html: 'Sorry — I could not complete that request.' }; } }
+  S.thinking = false;
+  S.chat.push({ who: 'ai', ...r });
+  renderPlanning();
 }
 function findRegion(t) {
   const map = { TS: /telangana|hyderabad|\bts\b/, KA: /karnataka|bengaluru|bangalore/, MH: /maharashtra|pune|mumbai/, DL: /delhi|ncr|gurgaon|noida/ };
@@ -1075,6 +1118,7 @@ function draftCopy(t) {
    ===================================================================== */
 function renderControl() {
   const T = planTotals(S.plan), P = PROFILES[S.profile];
+  const remote=S.backendViews?.control; if(remote){const k=remote.kpis;Object.assign(T,{inc:k.incremental_revenue,incLo:k.incremental_revenue_low,incHi:k.incremental_revenue_high,margin:k.plan_margin_pct,spend:k.budget_committed});}
   const risky = visibleItems(S.plan.items).filter(i => T.per[i.id].viol.length);
   const inReview = S.plan.items.filter(i => i.status === 'In review');
   const overBudget = T.spend > S.guard.budgetCap;
@@ -1083,6 +1127,7 @@ function renderControl() {
   if (risky.length) { const w = risky[0], m = T.per[w.id]; todos.push({ t: `Resolve risk on ${esc(w.name)}`, s: `${pct(m.pStock * 100)} stockout risk · margin ${pct(m.marginPct, 1)}`, a: `S.sel='${w.id}';ask('Make ${esc(w.name)} margin-safe')`, b: 'Fix with AI' }); }
   if (overBudget) todos.push({ t: 'Bring the plan within budget', s: `${L(T.spend)} planned against a ${L(S.guard.budgetCap)} cap`, a: `go('planning')`, b: 'Open plan' });
   if (inReview.length) todos.push({ t: `Approve ${inReview.length} campaign${inReview.length > 1 ? 's' : ''}`, s: inReview.map(i => esc(i.name)).join(' · '), a: `S.apprSel='${inReview[0].id}';go('approvals')`, b: 'Review' });
+  if(remote?.morning_brief?.decisions_needed){todos.length=0;for(const d of remote.morning_brief.decisions_needed){if(d.action==='copilot_fix')todos.push({t:esc(d.title),s:esc(d.detail),a:`S.sel='${d.item_id}';ask('Make this campaign margin-safe')`,b:'Fix with AI'});else if(d.action==='open_approvals')todos.push({t:esc(d.title),s:esc(d.detail),a:`S.apprSel='${d.item_id}';go('approvals')`,b:'Review'});else todos.push({t:esc(d.title),s:esc(d.detail),a:'go(\'planning\')',b:'Open plan'});}}
   const n = todos.length;
   const headline = n ? `${['No', 'One', 'Two', 'Three'][n]} decision${n > 1 ? 's' : ''} <em>need${n > 1 ? '' : 's'} you</em> today.` : `Your plan is <em>on track</em>.`;
   const dot = ok => `<span class="dot ${ok ? 'g' : 'r'}"></span>`;
@@ -1116,19 +1161,20 @@ function renderControl() {
     </div>
   </div>`;
 }
-function showBrief() {
+async function showBrief() {
   const T = planTotals(S.plan);
+  if(backendOnline()){S.backendViews ||= {};S.backendViews.brief=await apiCall(()=>RetailVerseAPI.executiveBrief());}
   const el = document.createElement('div');
   el.className = 'modal-bg';
   el.onclick = e => { if (e.target === el) el.remove(); };
   el.innerHTML = `<div class="modal brief-modal" style="width:520px">
     <div class="eyebrow" style="font-size:11px;letter-spacing:1.2px;text-transform:uppercase;color:var(--gold);font-weight:600">Executive brief</div>
-    <h3 style="font-family:Fraunces,Georgia,serif;font-weight:500;font-size:22px;margin:6px 0 14px;color:var(--navy)">Diwali 2026 plan</h3>
-    <p><b>Recommendation.</b> Replace blanket discounts with targeted offers, and move footwear stock from Pune to Hyderabad before 31 Oct.</p>
-    <p><b>Main risk.</b> ${T.worst ? `${esc(T.worst.it.name)}: ${pct(T.worst.m.pStock * 100)} stockout risk.` : 'None.'}</p>
-    <p><b>Action.</b> Accept the copilot's change set, then route it to Merchandising and Supply Chain.</p>
-    <p><b>Confidence.</b> Moderate. The elasticity comes from 14 past promotions, so pilot in two stores first.</p>
-    <p><b>Decision required.</b> Approve ${L(T.spend)} of plan spend (cap ${L(S.guard.budgetCap)}).</p>
+    <h3 style="font-family:Fraunces,Georgia,serif;font-weight:500;font-size:22px;margin:6px 0 14px;color:var(--navy)">${esc(S.backendViews?.brief?.title||'Diwali 2026 plan')}</h3>
+    <p><b>Recommendation.</b> ${esc(S.backendViews?.brief?.recommendation||'Replace blanket discounts with targeted offers, and move footwear stock from Pune to Hyderabad before 31 Oct.')}</p>
+    <p><b>Main risk.</b> ${esc(S.backendViews?.brief?.main_risk||(T.worst ? `${T.worst.it.name}: ${pct(T.worst.m.pStock * 100)} stockout risk.` : 'None.'))}</p>
+    <p><b>Action.</b> ${esc(S.backendViews?.brief?.action||"Accept the copilot's change set, then route it to Merchandising and Supply Chain.")}</p>
+    <p><b>Confidence.</b> ${esc(S.backendViews?.brief?.confidence||'Moderate. Pilot in two stores first.')}</p>
+    <p><b>Decision required.</b> ${esc(S.backendViews?.brief?.decision_required||`Approve ${L(T.spend)} of plan spend (cap ${L(S.guard.budgetCap)}).`)}</p>
     <div style="text-align:right;margin-top:14px"><button class="btn primary" onclick="this.closest('.modal-bg').remove()">Done</button></div>
   </div>`;
   document.body.appendChild(el);
@@ -1172,7 +1218,7 @@ function renderSim() {
     <label class="pill-select">Campaign <select onchange="S.sim.id=this.value;renderSim()">${S.plan.items.map(i => `<option value="${i.id}" ${i.id === it.id ? 'selected' : ''}>${esc(i.name)}</option>`).join('')}</select></label>
     <span class="muted">${REGIONS[it.region].city} · ${CATS[it.cat].n} · ${range(it)} · ${it.disc}% · ${AUD[it.aud].n}</span>
     <div style="flex:1"></div>
-    <span class="chip">2,000 Monte Carlo runs · σ ${sigma()}</span>
+    <span class="chip">2,000 Monte Carlo runs · σ ${sigma()}</span>${S.backendViews?.sim ? `<span class="chip green">Backend optimizer: ${S.backendViews.sim.optimized.feasible ? `${S.backendViews.sim.optimized.discount}% · ${esc(S.backendViews.sim.optimized.audience_name)}` : 'no feasible offer'}</span>` : ''}
   </div>
   <div class="grid" style="grid-template-columns:2fr 1fr">
     <div class="card"><div class="card-h">Digital twin: revenue distribution <span class="muted">· ranges, not point estimates</span></div><div class="card-b">
@@ -1200,7 +1246,7 @@ function renderSim() {
     </div></div>
     <div class="card"><div class="card-h">Red-team & crisis injection <span style="flex:1"></span><span class="chip ${resil >= 80 ? 'green' : resil >= 50 ? 'amber' : 'red'}">Resilience ${resil}/100</span></div><div class="card-b">
       <div class="stress" style="margin-bottom:10px">
-        ${[['demand', 'Demand +30%'], ['supplier', 'Supplier delay 5 days'], ['competitor', 'Competitor promo']].map(([k, n]) => `<button class="btn sm ${st[k] ? 'primary' : ''}" onclick="S.sim.stress.${k}=!S.sim.stress.${k};renderSim()">${st[k] ? '✓ ' : ''}${n}</button>`).join('')}
+        ${[['demand', 'Demand +30%'], ['supplier', 'Supplier delay 5 days'], ['competitor', 'Competitor promo']].map(([k, n]) => `<button class="btn sm ${st[k] ? 'primary' : ''}" onclick="toggleStress('${k}')">${st[k] ? '✓ ' : ''}${n}</button>`).join('')}
         <button class="btn sm danger" onclick="injectCrisis()">⚡ Inject crisis: supplier delayed</button>
       </div>
       <table class="t"><tr><th>Scenario</th><th>Stockout</th><th>Margin</th><th></th></tr>
@@ -1208,7 +1254,7 @@ function renderSim() {
     </div></div>
   </div>
   <div class="card" style="margin-top:14px"><div class="card-h">🤝 Agent Decision Room <span class="muted">· each agent reports from model outputs; the orchestrator returns one feasible proposal</span></div><div class="card-b">
-    ${S.sim.crisis ? `<div class="banner red" style="margin-bottom:10px">⚡ <div><b>Crisis injected:</b> ${S.sim.crisis}. Agents renegotiated and the proposal below was recomputed.</div></div>` : ''}
+    ${S.sim.crisis ? `<div class="banner red" style="margin-bottom:10px">⚡ <div><b>Crisis injected:</b> ${S.sim.crisis}. Agents renegotiated and the proposal below was recomputed.</div><button class="btn sm" onclick="clearSimulationCrisis()">Clear crisis</button></div>` : ''}
     <div class="grid g4">${agents.map(a => `<div class="mbox"><div class="l">${a.n}</div><div style="font-size:12.5px;margin-top:4px">${a.t}</div><div style="margin-top:6px"><span class="chip ${a.s}">${a.v}</span></div></div>`).join('')}</div>
     <div class="banner ai" style="margin-top:12px">🎯 <div style="flex:1"><b>Orchestrator:</b> ${agents.orch}</div><button class="btn sm ai" onclick="S.sel='${it.id}';ask('Make ${esc(it.name)} margin-safe')">Send to canvas as change set</button></div>
   </div></div>`;
@@ -1228,18 +1274,25 @@ function agentViews(it, m) {
   a.orch = fix && fix.changes.length ? fix.changes.map(c => c.label.replace(/<[^>]+>/g, '')).join(' · ') : 'Current plan is feasible. No changes.';
   return a;
 }
-function injectCrisis() {
+async function selectSimulation(id){S.sim.id=id;await loadScreenFromBackend('sim');renderSim();}
+async function toggleStress(key) { const next={...S.sim.stress,[key]:!S.sim.stress[key]}; if(backendOnline()&&!await apiCall(()=>RetailVerseAPI.stress(next)))return; S.sim.stress=next;await loadScreenFromBackend('sim');renderSim(); }
+async function toggleReadiness(id,key,done){ if(backendOnline()){const saved=await apiCall(()=>RetailVerseAPI.readiness(id,{key,done}));if(!saved)return;S.backendViews ||= {};S.backendViews.approval=saved;} if(!S.readiness[id])S.readiness[id]={};S.readiness[id][key]=done;audit(role().n,'Readiness updated',`${id}: ${key} → ${done}`);renderApprovals();}
+async function injectCrisis() {
+  if(backendOnline()) { const result=await apiCall(()=>RetailVerseAPI.crisis(S.sim.id)); if(!result)return; S.sim.crisis=result.crisis; }
   S.sim.stress.supplier = true;
   S.sim.crisis = 'Supplier for ' + CATS[item(S.sim.id).cat].n + ' delayed 5 days (−30% inbound stock)';
   audit('System', 'Crisis injected', S.sim.crisis);
   toast('⚡ Crisis injected. Agents are recomputing…');
-  renderSim();
+  await loadScreenFromBackend('sim');renderSim();
 }
 
 /* =====================================================================
    READINESS, APPROVAL & CREATIVE
    ===================================================================== */
 const READY_ITEMS = [['stock', 'Stock in place', 'Supply Chain'], ['price', 'Price loaded in POS', 'Merchandising'], ['creative', 'Creative approved', 'Marketing'], ['channels', 'Channels scheduled', 'Marketing'], ['supplier', 'Supplier confirmed', 'Supply Chain'], ['stores', 'Stores briefed (signage, shelf price)', 'Store Ops'], ['consent', 'Consent & compliance check', 'Legal']];
+async function selectApproval(id){S.apprSel=id;if(backendOnline()){const result=await apiCall(()=>RetailVerseAPI.approval(id));if(result){S.backendViews ||= {};S.backendViews.approval=result;const copy=await apiCall(()=>RetailVerseAPI.creativeDraft(id,S.creativeTone));if(copy){S.backendViews.creative=copy;const c=copy.copy;S.backendViews.creativeCheck=await apiCall(()=>RetailVerseAPI.creativeCheck(Object.values(c).join(' '),id));}}}renderApprovals();}
+async function setCreativeTone(tone){S.creativeTone=tone;S.unsafeCopy=false;if(backendOnline()){const copy=await apiCall(()=>RetailVerseAPI.creativeDraft(S.apprSel,tone));if(copy){S.backendViews ||= {};S.backendViews.creative=copy;S.backendViews.creativeCheck=copy.guardrails;}}renderApprovals();}
+async function toggleUnsafeCopy(){S.unsafeCopy=!S.unsafeCopy;if(backendOnline()){const c=S.backendViews?.creative?.copy;const text=S.unsafeCopy?'Lowest price ever guaranteed! Only today!':Object.values(c||{}).join(' ');S.backendViews ||= {};S.backendViews.creativeCheck=await apiCall(()=>RetailVerseAPI.creativeCheck(text,S.apprSel));}renderApprovals();}
 function readiness(id) {
   if (!S.readiness[id]) S.readiness[id] = { price: true, channels: id !== 'c3', supplier: true, stores: false, consent: true, creative: false };
   const it = item(id), m = sim(it, S.plan), r = S.readiness[id];
@@ -1248,6 +1301,7 @@ function readiness(id) {
 }
 function renderApprovals() {
   const list = S.plan.items.filter(i => i.status !== 'Draft');
+  const serverApproval=S.backendViews?.approval; if(serverApproval?.id===S.apprSel){S.readiness[S.apprSel]=Object.fromEntries(serverApproval.checklist.map(x=>[x.key,x.done]));S.approvals[S.apprSel]=serverApproval.approved_steps;S.overrides[S.apprSel]=serverApproval.override?.reason||null;}
   if (!list.find(i => i.id === S.apprSel)) S.apprSel = list[0] && list[0].id;
   const it = item(S.apprSel);
   if (!it) { $('#content').innerHTML = '<div class="empty">No campaigns beyond Draft yet.</div>'; return; }
@@ -1255,19 +1309,21 @@ function renderApprovals() {
   const chain = PROFILES[S.profile].chain, stepIdx = S.approvals[it.id] ?? 0;
   const m = sim(it, S.plan), v = violations(it, m);
   const myStep = role().step, canApprove = it.status === 'In review' && stepIdx < chain.length && chain[stepIdx] === myStep;
-  const cp = S.unsafeCopy ? { head: `LOWEST PRICE EVER! ${CATS[it.cat].n} ${it.disc + 30}% off. Guaranteed best deal`, push: `Last chance!!! Only today, hurry, stock running out forever`, wa: `Miracle offer, guaranteed results. Buy now before it's gone`, banner: `Was ₹9,999 now ₹${Math.round(CATS[it.cat].price * (1 - it.disc / 100))}` } : copyFor(it, S.creativeTone);
+  const remoteCopy=S.backendViews?.creative?.copy;
+  const localCopy=remoteCopy?{head:remoteCopy.headline,push:remoteCopy.push,wa:remoteCopy.whatsapp,banner:remoteCopy.banner}:copyFor(it,S.creativeTone);
+  const cp = S.unsafeCopy ? { head: `LOWEST PRICE EVER! ${CATS[it.cat].n} ${it.disc + 30}% off. Guaranteed best deal`, push: `Last chance!!! Only today, hurry, stock running out forever`, wa: `Miracle offer, guaranteed results. Buy now before it's gone`, banner: `Was ₹9,999 now ₹${Math.round(CATS[it.cat].price * (1 - it.disc / 100))}` } : localCopy;
   const forbidden = /(lowest price ever|guaranteed|last chance|miracle|forever|only today|hurry|was ₹9,999)/gi;
   const flag = s => esc(s).replace(forbidden, x => `<mark class="bad">${x}</mark>`);
-  const bad = Object.values(cp).some(s => new RegExp(forbidden.source, 'i').test(s));
+  const bad = S.backendViews?.creativeCheck ? !S.backendViews.creativeCheck.ok : Object.values(cp).some(s => new RegExp(forbidden.source, 'i').test(s));
   $('#content').innerHTML = `
   <div class="grid" style="grid-template-columns:260px 1fr 1fr">
     <div class="card"><div class="card-h">Campaigns</div><div class="list-sel">
-      ${list.map(i => { const rr = readiness(i.id), sc = Math.round(READY_ITEMS.filter(([k]) => rr[k]).length / READY_ITEMS.length * 100); return `<button class="${i.id === it.id ? 'on' : ''}" onclick="S.apprSel='${i.id}';renderApprovals()"><div style="flex:1"><b>${esc(i.name)}</b><div class="muted" style="font-size:11px">${REGIONS[i.region].city} · <span class="chip ${STATUS_CLS[i.status]}">${i.status}</span></div></div><span class="chip ${sc >= 85 ? 'green' : sc >= 60 ? 'amber' : 'red'}">${sc}</span></button>`; }).join('')}
+      ${list.map(i => { const rr = readiness(i.id), sc = Math.round(READY_ITEMS.filter(([k]) => rr[k]).length / READY_ITEMS.length * 100); return `<button class="${i.id === it.id ? 'on' : ''}" onclick="selectApproval('${i.id}')"><div style="flex:1"><b>${esc(i.name)}</b><div class="muted" style="font-size:11px">${REGIONS[i.region].city} · <span class="chip ${STATUS_CLS[i.status]}">${i.status}</span></div></div><span class="chip ${sc >= 85 ? 'green' : sc >= 60 ? 'amber' : 'red'}">${sc}</span></button>`; }).join('')}
     </div></div>
     <div class="grid" style="align-content:start">
       <div class="card"><div class="card-h">Readiness scorecard <span style="flex:1"></span><span class="chip ${score >= 85 ? 'green' : score >= 60 ? 'amber' : 'red'}">Go/No-go ${score}%</span></div><div class="card-b">
         <div class="bar" style="margin-bottom:10px"><i style="width:${score}%;background:${score >= 85 ? 'var(--green)' : score >= 60 ? 'var(--amber)' : 'var(--red)'}"></i></div>
-        ${READY_ITEMS.map(([k, n, o]) => `<label class="check"><input type="checkbox" ${r[k] ? 'checked' : ''} ${k === 'stock' ? 'disabled' : ''} onchange="S.readiness['${it.id}'].${k}=this.checked;audit(role().n,'Readiness updated','${esc(it.name)}: ${n} → '+this.checked);renderApprovals()"><span style="flex:1">${n}${k === 'stock' ? ' <span class="faint">(auto from simulator)</span>' : ''}</span><span class="muted" style="font-size:11px">${o}</span></label>`).join('')}
+        ${READY_ITEMS.map(([k, n, o]) => `<label class="check"><input type="checkbox" ${r[k] ? 'checked' : ''} ${k === 'stock' ? 'disabled' : ''} onchange="toggleReadiness('${it.id}','${k}',this.checked)"><span style="flex:1">${n}${k === 'stock' ? ' <span class="faint">(auto from simulator)</span>' : ''}</span><span class="muted" style="font-size:11px">${o}</span></label>`).join('')}
         ${v.length ? `<div class="banner red" style="margin-top:10px">⛔ ${v.map(x => x.t).join('; ')}${S.overrides[it.id] ? `<br><b>Override on record:</b> “${esc(S.overrides[it.id])}”` : ''}</div>` : ''}
       </div></div>
       <div class="card"><div class="card-h">Approval chain · ${PROFILES[S.profile].n}</div><div class="card-b">
@@ -1281,20 +1337,21 @@ function renderApprovals() {
       </div></div>
     </div>
     <div class="card" style="align-self:start"><div class="card-h">✍ Creative <span class="muted">· text only</span><span style="flex:1"></span>${bad ? '<span class="chip red">⛔ guardrail breaks</span>' : '<span class="chip green">✓ guardrails pass</span>'}</div><div class="card-b">
-      <div class="seg" style="margin-bottom:10px">${[['standard', 'Standard'], ['premium', 'More premium'], ['hindi', 'हिन्दी'], ['telugu', 'తెలుగు']].map(([k, n]) => `<button class="${S.creativeTone === k && !S.unsafeCopy ? 'on' : ''}" onclick="S.creativeTone='${k}';S.unsafeCopy=false;renderApprovals()">${n}</button>`).join('')}</div>
+      <div class="seg" style="margin-bottom:10px">${[['standard', 'Standard'], ['premium', 'More premium'], ['hindi', 'हिन्दी'], ['telugu', 'తెలుగు']].map(([k, n]) => `<button class="${S.creativeTone === k && !S.unsafeCopy ? 'on' : ''}" onclick="setCreativeTone('${k}')">${n}</button>`).join('')}</div>
       <div class="copybox"><div class="ch">Headline</div>${flag(cp.head)}</div>
       <div class="copybox"><div class="ch">Push notification</div>${flag(cp.push)}</div>
       <div class="copybox"><div class="ch">WhatsApp (approved template)</div>${flag(cp.wa)}</div>
       <div class="copybox"><div class="ch">Banner</div>${flag(cp.banner)}</div>
       ${bad ? `<div class="banner red">⛔ Blocked: unverifiable claims, fake urgency and an inflated reference price. Copy can't go live.</div>` : ''}
       <div class="row wrap" style="margin-top:10px">
-        <button class="btn sm" onclick="S.unsafeCopy=!S.unsafeCopy;renderApprovals()">${S.unsafeCopy ? 'Restore safe copy' : 'Test: paste risky copy'}</button>
-        <button class="btn sm green" ${bad ? 'disabled' : ''} onclick="readiness('${it.id}').creative=true;audit(role().n,'Creative approved','${esc(it.name)}');toast('Creative approved');renderApprovals()">✓ Approve creative</button>
+        <button class="btn sm" onclick="toggleUnsafeCopy()">${S.unsafeCopy ? 'Restore safe copy' : 'Test: paste risky copy'}</button>
+        <button class="btn sm green" ${bad ? 'disabled' : ''} onclick="toggleReadiness('${it.id}','creative',true)">✓ Approve creative</button>
       </div>
     </div></div>
   </div>`;
 }
-function approve(id) {
+async function approve(id) {
+  if(backendOnline()){const saved=await apiCall(()=>RetailVerseAPI.approve(id));if(!saved)return;await hydratePlan();await loadScreenFromBackend('approvals');renderApprovals();return;}
   const it = item(id), chain = PROFILES[S.profile].chain;
   const r = readiness(id), score = READY_ITEMS.filter(([k]) => r[k]).length / READY_ITEMS.length;
   const v = violations(it, sim(it, S.plan));
@@ -1306,8 +1363,8 @@ function approve(id) {
   else toast(`Approved. Next: ${chain[S.approvals[id]]}`);
   renderApprovals();
 }
-function rejectAppr(id) { const reason = prompt('Reason for sending back:'); if (!reason) return; const it = item(id); it.status = 'Draft'; S.approvals[id] = 0; audit(role().n, 'Sent back', `${it.name}: ${reason}`); renderApprovals(); }
-function goLive(id) { if (S.role === 'marketing') { toast('Separation of duties: the campaign creator cannot publish. Switch to Admin.'); return; } const it = item(id); it.status = 'Live'; audit(role().n, 'Published', it.name); toast('🚀 Scheduled go-live'); renderApprovals(); }
+async function rejectAppr(id) { const reason = prompt('Reason for sending back:'); if (!reason) return; if(backendOnline()){const saved=await apiCall(()=>RetailVerseAPI.rejectApproval(id,reason));if(!saved)return;await hydratePlan();await loadScreenFromBackend('approvals');return;} const it = item(id); it.status = 'Draft'; S.approvals[id] = 0; audit(role().n, 'Sent back', `${it.name}: ${reason}`); renderApprovals(); }
+async function goLive(id) { if(backendOnline()){const saved=await apiCall(()=>RetailVerseAPI.goLive(id));if(!saved)return;await hydratePlan();renderApprovals();return;} if (S.role === 'marketing') { toast('Separation of duties: the campaign creator cannot publish. Switch to Admin.'); return; } const it = item(id); it.status = 'Live'; audit(role().n, 'Published', it.name); toast('🚀 Scheduled go-live'); renderApprovals(); }
 
 /* =====================================================================
    WAR ROOM & LEARNING
@@ -1342,20 +1399,22 @@ function regionStatus(r, day) {
 }
 function renderWar() {
   const W = S.war;
+  const apiWar=S.backendViews?.war;
   const tabs = `<div class="seg" style="margin-bottom:14px"><button class="${W.tab === 'live' ? 'on' : ''}" onclick="S.war.tab='live';renderWar()">◉ Live monitor</button><button class="${W.tab === 'learn' ? 'on' : ''}" onclick="S.war.tab='learn';renderWar()">🧠 Reality check & learning</button></div>`;
   if (W.tab === 'learn') { $('#content').innerHTML = tabs + learningHtml(); return; }
   const regs = Object.keys(REGIONS);
-  const st = regs.map(r => ({ r, ...regionStatus(r, W.day) }));
+  const st = regs.map(r => {const remote=apiWar?.regions?.find(x=>x.region===r);if(remote)return {r,varPct:remote.variance_pct,left:remote.stock_left,daysLeft:remote.days_of_stock_left,status:remote.status==='red'?'r':remote.status==='amber'?'a':'g'};return { r, ...regionStatus(r, W.day) };});
   const dl = st.find(x => x.r === 'DL');
   const alert = W.day >= 3 && dl.status === 'r' && W.transfer !== 'done';
   const sel = W.region;
-  const { series } = warSeries(sel);
+  const localSeries=warSeries(sel).series;
+  const series=apiWar?.series?.[sel]?.map(x=>({pred:x.predicted,obs:x.observed}))||localSeries;
   const chart = lineChart(series, W.day);
   const before = regionStatus('DL', W.day);
   $('#content').innerHTML = tabs + `
   <div class="row wrap" style="margin-bottom:14px">
     <button class="btn ${W.running ? '' : 'primary'}" onclick="toggleWar()">${W.running ? '⏸ Pause' : W.day >= 10 ? '↺ Replay' : '▶ Run live feed'}</button>
-    <button class="btn" onclick="stepWar()" ${W.day >= 10 ? 'disabled' : ''}>Step +1 day</button>
+    <button class="btn" onclick="stepWar()" ${W.day >= 10 ? 'disabled' : ''}>Step +1 day</button><button class="btn sm" onclick="resetWarRoom()">Reset scenario</button>
     <span class="chip blue">Diwali footwear window · day ${W.day}/10 · ${ds(33 + W.day)}</span>
     <span class="muted" style="font-size:12px">Scripted synthetic feed (simulated time-stepping)</span>
   </div>
@@ -1371,7 +1430,7 @@ function renderWar() {
         ${W.transfer === 'done' ? `<div class="banner green">✓ Transfer of ${warT().toLocaleString('en-IN')} units Pune → Delhi approved and dispatched. Delhi cover restored to ${before.daysLeft.toFixed(1)} days.</div>` :
           alert || W.transfer === 'sim' ? `<div class="banner ai" style="margin-bottom:10px">✦ <div><b>AI proposes:</b> transfer <b>${warT().toLocaleString('en-IN')} units</b> Pune → Delhi (Pune has ${Math.round(regionStatus('MH', W.day).left)} units, +${Math.round(regionStatus('MH', W.day).daysLeft)} days cover). Lead time 1 day.</div></div>
             ${W.transfer === 'sim' ? `<table class="t" style="margin-bottom:10px"><tr><th></th><th>Before</th><th>After</th></tr><tr><td>Delhi stockout risk</td><td style="color:var(--red)">78%</td><td style="color:var(--green)">9%</td></tr><tr><td>Pune stockout risk</td><td>3%</td><td>6%</td></tr><tr><td>Revenue protected</td><td>—</td><td>+${L(warT() * 2400 * .82)}</td></tr></table>` : ''}
-            <div class="row"><button class="btn" onclick="S.war.transfer='sim';renderWar()">∿ Simulate before/after</button><button class="btn green" ${W.transfer === 'sim' && canEdit() ? '' : 'disabled'} onclick="approveTransfer()">✓ Approve transfer</button></div>
+            <div class="row"><button class="btn" onclick="simulateWarTransfer()">∿ Simulate before/after</button><button class="btn green" ${W.transfer === 'sim' && canEdit() ? '' : 'disabled'} onclick="approveTransfer()">✓ Approve transfer</button></div>
             ${!canEdit() ? '<div class="muted" style="font-size:11.5px;margin-top:6px">Your role cannot approve interventions.</div>' : ''}` :
           '<div class="muted">No interventions needed. Monitoring…</div>'}
       </div></div>
@@ -1400,6 +1459,8 @@ function lineChart(series, day) {
     <g font-size="11"><line x1="${w - 190}" x2="${w - 170}" y1="14" y2="14" stroke="#1f3b73" stroke-dasharray="5 4" stroke-width="2"/><text x="${w - 165}" y="18" fill="#667085">forecast</text><line x1="${w - 105}" x2="${w - 85}" y1="14" y2="14" stroke="#dc2626" stroke-width="2.5"/><text x="${w - 80}" y="18" fill="#667085">observed</text></g>
   </svg>`;
 }
+async function resetWarRoom(){if(backendOnline()){const data=await apiCall(()=>RetailVerseAPI.warReset());if(!data)return;S.backendViews ||= {};S.backendViews.war=data;}clearInterval(warTimer);Object.assign(S.war,{day:0,transfer:'none',alerted:false,running:false});renderWar();}
+async function clearSimulationCrisis(){if(backendOnline()&&!await apiCall(()=>RetailVerseAPI.clearCrisis()))return;S.sim.crisis=null;S.sim.stress={};await loadScreenFromBackend('sim');renderSim();}
 function toggleWar() {
   const W = S.war;
   if (W.running) { W.running = false; clearInterval(warTimer); renderWar(); return; }
@@ -1408,18 +1469,20 @@ function toggleWar() {
   warTimer = setInterval(() => { if (S.screen !== 'war') { clearInterval(warTimer); W.running = false; return; } stepWar(true); }, 1100);
   renderWar();
 }
-function stepWar(auto) {
-  const W = S.war; if (W.day >= 10) { W.running = false; clearInterval(warTimer); renderWar(); return; }
+async function stepWar(auto) {
+  const W = S.war; if(!canEdit()){toast('War-room controls are read-only for this role.');return;} if(backendOnline()) { const data=await apiCall(()=>RetailVerseAPI.warStep()); if(!data)return; S.backendViews ||= {};S.backendViews.war=data; W.day=data.day; W.transfer=data.transfer; W.alerted=data.alert!==null; renderWar(); return; } if (W.day >= 10) { W.running = false; clearInterval(warTimer); renderWar(); return; }
   W.day++;
   const dl = regionStatus('DL', W.day);
   if (W.day >= 3 && dl.status === 'r' && W.transfer === 'none' && !W.alerted) { W.alerted = true; W.region = 'DL'; audit('System', 'Early-warning alert', `Delhi footwear +${Math.round(dl.varPct)}% vs forecast`); audit('System', 'Circuit breaker triggered', 'Throttle push, Delhi footwear (demand > +25% vs forecast)'); if (auto) { W.running = false; clearInterval(warTimer); toast('🚨 Delhi turned red. Feed paused for your decision.'); } }
   renderWar();
 }
-function approveTransfer() { S.war.transfer = 'done'; audit(role().n, 'Approved intervention', `Transfer ${warT()} footwear units Pune → Delhi`); toast('✓ Transfer approved & dispatched'); renderWar(); }
+async function simulateWarTransfer() { if(backendOnline()){const data=await apiCall(()=>RetailVerseAPI.warTransferSim());if(!data)return;S.backendViews ||= {};S.backendViews.warSimulation=data;S.war.transfer='sim';renderWar();return;} S.war.transfer='sim';renderWar(); }
+async function approveTransfer() { if(backendOnline()) { const data=await apiCall(()=>RetailVerseAPI.warTransferApprove()); if(!data)return; S.backendViews ||= {};S.backendViews.war=data; } S.war.transfer = 'done'; audit(role().n, 'Approved intervention', `Transfer ${warT()} footwear units Pune → Delhi`); toast('✓ Transfer approved & dispatched'); renderWar(); }
 function learningHtml() {
-  const rows = [['Diwali Footwear Fest', 'Hyderabad', 21.4, 19.8, 14], ['Delhi Festive Kicks', 'Delhi', 14.2, 18.9, 11], ['Glow for Diwali', 'Pune', 6.1, 5.7, 9], ['Festive Ethnic Wear', 'Bengaluru', 17.5, 16.2, 12], ['Gadget Upgrade EMI', 'Delhi', 12.8, 13.4, 7]];
-  const topics = [['Size availability', 38, true], ['Delivery delay', 21], ['Price / offer clarity', 14], ['Product quality', 11], ['Store experience', 9]];
-  const locked = S.tier < 3;
+  const learning=S.backendViews?.learning;
+  const rows = learning?.reality_check?.map(r=>[r.campaign,r.city,r.predicted_L,r.actual_L,r.uplift_pct]) || [['Diwali Footwear Fest', 'Hyderabad', 21.4, 19.8, 14], ['Delhi Festive Kicks', 'Delhi', 14.2, 18.9, 11], ['Glow for Diwali', 'Pune', 6.1, 5.7, 9], ['Festive Ethnic Wear', 'Bengaluru', 17.5, 16.2, 12], ['Gadget Upgrade EMI', 'Delhi', 12.8, 13.4, 7]];
+  const topics = learning?.feedback?.topics?.map(x=>[x.topic,x.share_pct,x.spike]) || [['Size availability', 38, true], ['Delivery delay', 21], ['Price / offer clarity', 14], ['Product quality', 11], ['Store experience', 9]];
+  const locked = learning?.feedback?.locked ?? S.tier < 3;
   return `<div class="grid g2">
     <div class="card"><div class="card-h">Reality check: predicted vs actual <span class="muted">· treatment vs control (synthetic)</span></div><div class="card-b" style="padding:0">
       <table class="t"><tr><th>Campaign</th><th>Predicted inc. rev</th><th>Actual (vs control)</th><th>Error</th><th>Uplift</th></tr>
@@ -1433,7 +1496,7 @@ function learningHtml() {
   </div>
   <div class="grid g2" style="margin-top:14px">
     <div class="card"><div class="card-h">🔎 Root-cause <span class="muted">· ranked hypotheses, not facts</span></div><div class="card-b">
-      ${[['Size curve mismatch: sizes 8–9 out of stock in 60% of Delhi stores', 0.62], ['Demand spike from competitor stock-out nearby', 0.21], ['Push notification sent twice (channel collision)', 0.11], ['Data lag in store inventory feed', 0.06]].map(([t, p], i) => `<div class="brief-item"><div class="ic" style="background:var(--surface-2)">${i + 1}</div><div style="flex:1">${t}<div class="bar" style="margin-top:4px"><i style="width:${p * 100}%"></i></div></div><span class="muted">${Math.round(p * 100)}%</span></div>`).join('')}
+      ${(learning?.root_causes?.items?.map(x=>[x.hypothesis,x.likelihood]) || [['Size curve mismatch: sizes 8–9 out of stock in 60% of Delhi stores', 0.62], ['Demand spike from competitor stock-out nearby', 0.21], ['Push notification sent twice (channel collision)', 0.11], ['Data lag in store inventory feed', 0.06]]).map(([t, p], i) => `<div class="brief-item"><div class="ic" style="background:var(--surface-2)">${i + 1}</div><div style="flex:1">${t}<div class="bar" style="margin-top:4px"><i style="width:${p * 100}%"></i></div></div><span class="muted">${Math.round(p * 100)}%</span></div>`).join('')}
     </div></div>
     <div class="card"><div class="card-h">🔁 Learning loop</div><div class="card-b">
       <div class="banner ai" style="margin-bottom:10px">✦ <div><b>Suggested new guardrail:</b> for apparel & footwear, require <b>size coverage ≥ 80%</b> in each store before a campaign can go live.</div></div>
@@ -1443,7 +1506,7 @@ function learningHtml() {
     </div></div>
   </div>`;
 }
-function addLearnGuard() { S.learnGuardAdded = true; S.guard.extra.push('Size coverage ≥ 80% per store (apparel & footwear)'); audit(role().n, 'Guardrail added', 'Size coverage ≥ 80% (from learning loop)'); toast('✓ New guardrail active'); renderWar(); }
+async function addLearnGuard() { if(backendOnline() && !await apiCall(()=>RetailVerseAPI.addLearningGuardrail())) return; S.learnGuardAdded = true; S.guard.extra.push('Size coverage ≥ 80% per store (apparel & footwear)'); audit(role().n, 'Guardrail added', 'Size coverage ≥ 80% (from learning loop)'); toast('✓ New guardrail active'); renderWar(); }
 
 /* =====================================================================
    GOVERNANCE & CONFIG
@@ -1490,22 +1553,27 @@ function renderGov() {
     ${S.audit.map(a => `<tr><td class="muted">${a.t}</td><td><b>${esc(a.who)}</b> ${a.src === 'ai' ? '<span class="chip ai">AI</span>' : ''}</td><td>${esc(a.action)}</td><td class="muted">${esc(a.detail)}</td></tr>`).join('')}</table>
   </div></div>`;
 }
-function setGuard(k, v) { if (!canEdit()) return; S.guard[k] = v; audit(role().n, 'Guardrail changed', `${k} → ${v}`); toast('Guardrail updated. Plan re-validated.'); renderGov(); }
-function setTier(t) { S.tier = t; audit(role().n, 'Data tier changed', 'Tier ' + t); toast(`Data tier ${t}: ${t === 1 ? 'segments & feedback locked' : t === 2 ? 'segments unlocked' : 'all features unlocked'}`); renderGov(); }
-function setProfile(k) {
+async function setDiscountCap(cat,value){if(!canEdit())return;S.guard.discountCap[cat]=value;if(backendOnline())await apiCall(()=>RetailVerseAPI.updateGovernance({discountCap:{[cat]:value}}));renderGov();}
+async function setGuard(k, v) { if (!canEdit()) return; S.guard[k] = v; if(backendOnline()) await apiCall(()=>RetailVerseAPI.updateGovernance({[k]:v})); audit(role().n, 'Guardrail changed', `${k} → ${v}`); toast('Guardrail updated. Plan re-validated.'); renderGov(); }
+async function setTier(t) { if(backendOnline()&&!canEdit()){toast('Read-only for '+role().n);return;} S.tier = t; if(backendOnline()) await apiCall(()=>RetailVerseAPI.updateGovernance({tier:t})); audit(role().n, 'Data tier changed', 'Tier ' + t); toast(`Data tier ${t}: ${t === 1 ? 'segments & feedback locked' : t === 2 ? 'segments unlocked' : 'all features unlocked'}`); renderGov(); }
+async function setProfile(k) {
+  if(backendOnline()&&!canEdit()){toast('Read-only for '+role().n);renderTopbar();return;}
   S.profile = k; const p = PROFILES[k];
+  if(backendOnline()) { const saved=await apiCall(()=>RetailVerseAPI.updateGovernance({profile:k})); if(!saved)return; }
   audit(role().n, 'Profile switched', p.n);
   toast(`Adapted to <b>${p.n}</b>: ${p.constraint.toLowerCase()} · levers: ${p.levers.toLowerCase()} · approval chain ${p.chain.length} steps`);
   render();
 }
-function runGovTest() {
+async function runGovTest() {
   const cat = $('#gtCat').value, d = +$('#gtDisc').value;
   const it = { id: 'test', name: 'Test', region: 'TS', cat, start: 33, len: 10, disc: d, aud: 'all', budget: 40000, status: 'Draft', mech: '% off', excl: false };
   const m = sim(it, S.plan), v = violations(it, m);
   const best = optimize(it, S.plan);
+  const apiTest=backendOnline()?await apiCall(()=>RetailVerseAPI.governanceTest({cat,disc:d,region:'TS'})):null;
   S.govTest = v.length
     ? `<div class="banner red" style="margin-top:10px">🛑 <div><b>Blocked.</b><br>${v.map(x => '• ' + x.t).join('<br>')}${best ? `<br><br><b>Feasible alternative:</b> ${best.it.disc}% off for “${AUD[best.it.aud].n}”${best.it.excl ? ', excluding low-stock SKUs' : ''}. Margin ${pct(best.m.marginPct, 1)}, stockout ${pct(best.m.pStock * 100)}, inc. profit ${L(best.m.incProfit)}.` : ''}</div></div>`
     : `<div class="banner green" style="margin-top:10px">✓ Allowed. Margin ${pct(m.marginPct, 1)}, stockout ${pct(m.pStock * 100)}.</div>`;
+  if(apiTest) S.govTest=`<div class="banner ${apiTest.allowed?'green':'red'}" style="margin-top:10px">${apiTest.allowed?'✓ Allowed':'🛑 Blocked'} by backend guardrails.${apiTest.violations?.length?`<br>${apiTest.violations.map(x=>esc(x)).join('<br>')}`:''}${apiTest.feasible_alternative?`<br>Feasible alternative: ${apiTest.feasible_alternative.discount}% · ${esc(apiTest.feasible_alternative.audience)}.`:''}</div>`;
   audit(role().n, 'Guardrail test', `${d}% off ${CATS[cat].n}: ${v.length ? 'blocked' : 'allowed'}`);
   renderGov();
 }
@@ -1676,11 +1744,18 @@ function recCardHtml(r, i, o = {}) {
       </div>
     </div></div>`;
 }
-function addRec(region, cat, aud, disc, start, len, budget) {
+async function addRec(region, cat, aud, disc, start, len, budget) {
   if (!canEdit()) { toast('Read-only for ' + role().n); return; }
-  pushUndo();
   const it = { id: nid('c'), name: `${AUD_SHORT[aud]} ${CATS[cat].n} · ${REGIONS[region].city}`, region, cat, start, len, disc, aud, budget, status: 'Draft', mech: MECH_FOR(cat, aud), excl: false };
-  S.plan.items.push(it); S.sel = it.id;
+  if (backendOnline()) {
+    const saved = await apiCall(() => RetailVerseAPI.createItem(it));
+    if (!saved) return;
+    S.sel = saved.id;
+    await hydratePlan();
+    S.backendCanUndo = true; S.backendCanRedo = false;
+  } else {
+    pushUndo(); S.plan.items.push(it); S.sel = it.id;
+  }
   audit(role().n, 'Added recommended promotion', `${it.name} · ${disc}% · ${AUD[aud].n}`);
   explainChange(lastUndo(), [it.id], 'Added from Promotions', 'ai');
   toast(`＋ ${esc(it.name)} added to the plan as a draft. <a href="#" style="color:var(--gold)" onclick="go('planning');return false">View in plan →</a>`);
@@ -1781,8 +1856,8 @@ function activeHtml() {
    ===================================================================== */
 const cardWith = txt => [...document.querySelectorAll('.card')].find(c => { const h = c.querySelector('.card-h'); return h && h.textContent.includes(txt); });
 const TOUR = [
-  { go: 'control', el: () => $('.home h2'), t: 'Welcome to AI BOS',
-    p: 'AI BOS is an AI Business Operations System for retail promotions. This page is the executive landing: one headline, three numbers and what needs a decision today.',
+  { go: 'control', el: () => $('.home h2'), t: 'Welcome to RetailVerse',
+    p: 'RetailVerse is an AI decision twin for retail promotions. This page is the executive landing: one headline, three numbers and what needs a decision today.',
     say: 'Don’t just predict the promotion. <b>Simulate the decision.</b>' },
   { go: 'control', el: () => $('.metrics'), t: 'The plan at a glance',
     p: 'Incremental revenue, margin and budget, each shown as a range and a status dot. Every figure comes from the simulator, never from the AI’s text.',
@@ -1899,12 +1974,13 @@ document.addEventListener('keydown', e => { if (!tour.on) return; if (e.key === 
 function boot() {
   initState();
   $('#profileSel').addEventListener('change', e => setProfile(e.target.value));
-  $('#seasonSel').addEventListener('change', e => { S.season = e.target.value; audit(role().n, 'Season mode', SEASONS[S.season].n); toast(`Season mode: ${SEASONS[S.season].n}. Uncertainty σ = ${sigma()}, safety buffers updated.`); render(); });
-  $('#roleSel').addEventListener('change', e => { S.role = e.target.value; audit('System', 'Role switched', role().n); toast(`Viewing as <b>${esc(role().n)}</b>${canEdit() ? '' : ' (read-only)'}`); render(); });
+  $('#seasonSel').addEventListener('change', async e => { if(backendOnline()&&!canEdit()){toast('Read-only for '+role().n);renderTopbar();return;} S.season = e.target.value; if(backendOnline()) await apiCall(()=>RetailVerseAPI.updateGovernance({season:S.season})); audit(role().n, 'Season mode', SEASONS[S.season].n); toast(`Season mode: ${SEASONS[S.season].n}. Uncertainty σ = ${sigma()}, safety buffers updated.`); render(); });
+  $('#roleSel').addEventListener('change', async e => { S.role = e.target.value; audit('System', 'Role switched', role().n); toast(`Viewing as <b>${esc(role().n)}</b>${canEdit() ? '' : ' (read-only)'}`); if(backendOnline()) await hydratePlan(); render(); loadScreenFromBackend(S.screen); });
   document.addEventListener('keydown', e => {
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z' && !/INPUT|TEXTAREA|SELECT/.test(document.activeElement.tagName)) { e.preventDefault(); e.shiftKey ? redo() : undo(); }
   });
   bindCanvas();
   render();
+  connectBackend();
 }
 boot();

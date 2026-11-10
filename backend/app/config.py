@@ -20,8 +20,8 @@ _load_dotenv()
 
 
 class Settings:
-    # LLM provider: auto | ollama | groq | none   (auto = groq if key set, else ollama if reachable, else rules)
-    llm_provider = property(lambda s: os.getenv("LLM_PROVIDER", "auto").lower())
+    # LLM provider: ollama | groq | auto | none   (Ollama is the default; rules fallback stays available)
+    llm_provider = property(lambda s: os.getenv("LLM_PROVIDER", "ollama").lower())
     groq_api_key = property(lambda s: os.getenv("GROQ_API_KEY", ""))
     groq_model = property(lambda s: os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile"))
     groq_base_url = property(lambda s: os.getenv("GROQ_BASE_URL", "https://api.groq.com/openai/v1"))

@@ -70,6 +70,7 @@ class ItemPatch(BaseModel):
     excl: Optional[bool] = None
     region: Optional[str] = None
     cat: Optional[str] = None
+    status: Optional[str] = None
 
 
 class ChatIn(BaseModel):
@@ -201,6 +202,8 @@ def patch_item(item_id: str, body: ItemPatch, a: Actor = Depends(actor)):
         it = S.get_item(st, item_id)
         a.scope_item(it)
         patch = {k: v for k, v in body.model_dump().items() if v is not None}
+        if "status" in patch and patch["status"] not in ("Draft", "Proposed"):
+            raise S.ToolError("Status changes to In review, Approved or Live must use the approval workflow.")
         if "region" in patch:
             patch["region"] = S.norm_region(patch["region"])
         if "cat" in patch:
@@ -259,7 +262,12 @@ def redo(a: Actor = Depends(actor)):
 
 @app.get("/api/audit")
 def audit_log(limit: int = 200, a: Actor = Depends(actor)):
-    return {"events": get_ws().audit_log(limit)}
+    events = get_ws().audit_log(max(1, min(limit, 500)))
+    # Store users must not see audit details for campaigns outside their region.
+    if a.cfg.get("region"):
+        visible_names = {i["name"] for i in get_ws().st["plan"]["items"] if i["region"] == a.cfg["region"]}
+        events = [e for e in events if not e["detail"] or any(n in e["detail"] for n in visible_names)]
+    return {"events": events}
 
 
 # ----------------------------------------------------------------- data & tools as plain endpoints (M1, tool layer)
@@ -272,7 +280,10 @@ def forecast(region: str, cat: str, start: Optional[int] = None, days: int = 14,
 
 @app.get("/api/inventory")
 def inventory(region: Optional[str] = None, cat: Optional[str] = None, a: Actor = Depends(actor)):
-    return S.get_inventory(get_ws().st, region or a.cfg.get("region"), cat)
+    if region and a.cfg.get("region") and S.norm_region(region) != a.cfg["region"]:
+        raise HTTPException(403, "Outside your region scope (ABAC).")
+    result = S.get_inventory(get_ws().st, region or a.cfg.get("region"), cat)
+    return result
 
 
 @app.get("/api/segments")
@@ -304,13 +315,28 @@ def optimize_ep(body: OptIn, a: Actor = Depends(actor)):
 
 
 @app.get("/api/constraints")
-def constraints(item_id: Optional[str] = None):
-    return S.check_constraints(get_ws().st, item_id)
+def constraints(item_id: Optional[str] = None, a: Actor = Depends(actor)):
+    st = get_ws().st
+    if item_id:
+        a.scope_item(S.get_item(st, item_id))
+    result = S.check_constraints(st, item_id)
+    if not item_id and a.cfg.get("region"):
+        result["campaigns"] = [row for row in result.get("campaigns", [])
+                               if S.get_item(st, row["id"])["region"] == a.cfg["region"]]
+        visible_ids = {i["id"] for i in st["plan"]["items"] if i["region"] == a.cfg["region"]}
+        result["conflicts"] = [c for c in result.get("conflicts", [])
+                                if not c.get("ids") or set(c["ids"]).issubset(visible_ids)]
+        result["ok"] = not result["campaigns"] and not result["conflicts"]
+    return result
 
 
 @app.get("/api/conflicts")
-def conflicts_ep():
-    return S.find_conflicts(get_ws().st)
+def conflicts_ep(a: Actor = Depends(actor)):
+    result = S.find_conflicts(get_ws().st)
+    if a.cfg.get("region"):
+        ids = {i["id"] for i in get_ws().st["plan"]["items"] if i["region"] == a.cfg["region"]}
+        result["conflicts"] = [c for c in result["conflicts"] if c.get("ids") and set(c["ids"]).issubset(ids)]
+    return result
 
 
 @app.get("/api/transfers/suggest")
@@ -396,7 +422,10 @@ def sim_lab(item_id: str, runs: int = 2000, a: Actor = Depends(actor)):
 
 
 @app.put("/api/simulation/stress")
-def set_stress(body: StressIn):
+def set_stress(body: StressIn, a: Actor = Depends(actor)):
+    a.require_edit()
+    # Scenario controls alter shared workspace state and require a planner role.
+    # Keep the dependency in the signature so role checks remain consistent with other writes.
     ws = get_ws()
     with ws.mutate() as st:
         for k, v in body.model_dump().items():
@@ -407,6 +436,7 @@ def set_stress(body: StressIn):
 
 @app.post("/api/simulation/{item_id}/crisis")
 def crisis(item_id: str, a: Actor = Depends(actor)):
+    a.require_edit()
     ws = get_ws()
     with ws.mutate():
         c = ops.inject_crisis(ws, item_id, a.name)
@@ -414,7 +444,8 @@ def crisis(item_id: str, a: Actor = Depends(actor)):
 
 
 @app.delete("/api/simulation/crisis")
-def clear_crisis():
+def clear_crisis(a: Actor = Depends(actor)):
+    a.require_edit()
     ws = get_ws()
     with ws.mutate() as st:
         st["crisis"] = None; st["stress"] = {}
@@ -430,13 +461,15 @@ def approvals():
 
 
 @app.get("/api/approvals/{item_id}")
-def approval_one(item_id: str):
+def approval_one(item_id: str, a: Actor = Depends(actor)):
+    a.scope_item(S.get_item(get_ws().st, item_id))
     return ops.readiness_view(get_ws(), item_id)
 
 
 @app.patch("/api/approvals/{item_id}/readiness")
 def set_readiness(item_id: str, body: ReadyIn, a: Actor = Depends(actor)):
     a.require_edit()
+    a.scope_item(S.get_item(get_ws().st, item_id))
     ws = get_ws()
     with ws.mutate():
         ops.toggle_readiness(ws, item_id, body.key, body.done, a.name)
@@ -446,6 +479,7 @@ def set_readiness(item_id: str, body: ReadyIn, a: Actor = Depends(actor)):
 @app.post("/api/approvals/{item_id}/submit")
 def submit_review(item_id: str, a: Actor = Depends(actor)):
     a.require_edit()
+    a.scope_item(S.get_item(get_ws().st, item_id))
     ws = get_ws()
     with ws.mutate():
         ops.send_to_review(ws, item_id, a.name)
@@ -455,6 +489,7 @@ def submit_review(item_id: str, a: Actor = Depends(actor)):
 @app.post("/api/approvals/{item_id}/override")
 def override(item_id: str, body: ReasonIn, a: Actor = Depends(actor)):
     a.require_edit()
+    a.scope_item(S.get_item(get_ws().st, item_id))
     ws = get_ws()
     with ws.mutate():
         ops.set_override(ws, item_id, body.reason, a.name)
@@ -464,6 +499,7 @@ def override(item_id: str, body: ReasonIn, a: Actor = Depends(actor)):
 @app.post("/api/approvals/{item_id}/approve")
 def approve(item_id: str, a: Actor = Depends(actor)):
     a.require_edit()
+    a.scope_item(S.get_item(get_ws().st, item_id))
     ws = get_ws()
     with ws.mutate():
         return ops.approve(ws, item_id, a.key)
@@ -472,6 +508,7 @@ def approve(item_id: str, a: Actor = Depends(actor)):
 @app.post("/api/approvals/{item_id}/reject")
 def reject_appr(item_id: str, body: ReasonIn, a: Actor = Depends(actor)):
     a.require_edit()
+    a.scope_item(S.get_item(get_ws().st, item_id))
     ws = get_ws()
     with ws.mutate():
         ops.reject_approval(ws, item_id, body.reason, a.name)
@@ -481,6 +518,7 @@ def reject_appr(item_id: str, body: ReasonIn, a: Actor = Depends(actor)):
 @app.post("/api/approvals/{item_id}/go-live")
 def go_live(item_id: str, a: Actor = Depends(actor)):
     a.require_edit()
+    a.scope_item(S.get_item(get_ws().st, item_id))
     ws = get_ws()
     with ws.mutate():
         ops.go_live(ws, item_id, a.key)
@@ -507,7 +545,8 @@ def war():
 
 
 @app.post("/api/warroom/step")
-def war_step():
+def war_step(a: Actor = Depends(actor)):
+    a.require_edit()
     ws = get_ws()
     with ws.mutate():
         return ops.war_step(ws)
@@ -527,7 +566,8 @@ def war_approve(a: Actor = Depends(actor)):
 
 
 @app.post("/api/warroom/reset")
-def war_reset():
+def war_reset(a: Actor = Depends(actor)):
+    a.require_edit()
     ws = get_ws()
     with ws.mutate():
         ops.war_reset(ws)

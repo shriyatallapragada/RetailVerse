@@ -1,18 +1,27 @@
-# AI BOS: Business Operations System
+# RetailVerse · AI Retail Decision Twin
 
 **Don't just predict the promotion. Simulate the decision.**
 
 This is a clickable prototype of the TCS Hackathon blueprint (Retail / E-commerce, PS3). Retail teams plan promotions on a visual canvas. An AI copilot proposes edits, and every edit is checked against inventory, margin and budget and simulated with ranges. Nothing is applied until a human accepts it.
 
-## Run
+## Run the connected app
 
-No install or build step is needed. From this folder, run:
+The FastAPI backend serves the UI and connects planning, simulation, approvals, governance, and copilot actions to the API. Install Ollama, download the model, and start the Ollama service:
 
 ```bash
-python -m http.server 5173
+ollama pull llama3.1:8b
+ollama serve
 ```
 
-Then open http://localhost:5173.
+In a second terminal:
+
+```bash
+cd backend
+python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+.venv/bin/uvicorn app.main:app --port 8000 --reload
+```
+
+Open http://localhost:8000. To use only the static prototype, run `python -m http.server 5173`; it uses the browser’s local rules copilot unless the backend is also running on port 8000.
 
 ## Files
 
@@ -56,14 +65,7 @@ Use **Reset demo** in the sidebar to start over.
 ## Notes
 
 - All data is synthetic, counterfactuals are estimates and root causes are hypotheses.
-- The copilot is a deterministic intent parser that calls the real simulator and optimizer functions in `app.js`. Every number comes from those tools and is never made up. To swap in an LLM with tool calling (e.g. Claude), give it the same functions as tools: `simulate`, `optimize`, `check_constraints`, `find_conflicts`, `suggest_transfer`, `draft_copy`.
+- The static prototype includes a deterministic local copilot. The FastAPI backend provides the tool-calling copilot; configure Ollama to enable the local LLM. The backend keeps forecasting and optimization deterministic and uses the LLM for language and tool selection.
 - The AI writes only to a draft layer and cannot approve or publish. Every action is recorded in the audit log.
 
-## Backend
-
-A FastAPI backend with an open-source LLM copilot (Ollama or Groq) lives in [`backend/`](backend/README.md). Quick start:
-
-```bash
-cd backend && python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
-.venv/bin/uvicorn app.main:app --port 8000
-```
+The backend routes and Ollama settings are documented in [`backend/README.md`](backend/README.md).
